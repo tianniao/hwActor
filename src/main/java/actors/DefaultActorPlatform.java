@@ -1,7 +1,6 @@
 package actors;
 
-import java.util.concurrent.locks.Condition;
-import java.util.concurrent.locks.ReentrantLock;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import actors.log.DefaultLogger;
 import actors.log.Logger;
@@ -12,13 +11,8 @@ public class DefaultActorPlatform implements ActorPlatform {
 
     private volatile Boolean running = true;
     private ActorManager actorManager = new DefaultActorManager();
-    private volatile int messageCount = 0;
     private MessageLinkedList messageList = new MessageLinkedList();
-
-    private ReentrantLock lock = new ReentrantLock();
-    private Condition hasMessageCondition = lock.newCondition();
-    private Condition hasActiveActorCondition = lock.newCondition();
-    private Condition hasFinishCondition = lock.newCondition();
+    private AtomicInteger messageListAtomic = new AtomicInteger(0);
 
     class BackendThread extends Thread {
         @Override
@@ -30,17 +24,6 @@ public class DefaultActorPlatform implements ActorPlatform {
                     if (null != actor) {
                         actor.execute();
                         actorManager.returnActorToMap(actor);
-                        try {
-                            lock.lock();
-                            messageCount--;
-                            if (messageCount <= 0) {
-                                hasFinishCondition.signal();
-                            }
-                        }
-                        finally {
-                            lock.unlock();
-                        }
-                        notifyActorReturn();
                     }
                 }
                 catch (Exception e) {
@@ -94,72 +77,45 @@ public class DefaultActorPlatform implements ActorPlatform {
 
     @Override
     public boolean sendMessage(Message message) {
-        try {
-            lock.lock();
-            messageList.addMessage(message);
-            messageCount++;
-            if (messageCount > 0) {
-                hasMessageCondition.signal();
-            }
-        }
-        catch (Exception e) {
-            logger.error("Send message exception ", e);
-        }
-        finally {
-            lock.unlock();
-        }
+        acquiredMessageListLock();
+        messageList.addMessage(message);
+        messageListAtomic.compareAndSet(1, 0);
         return true;
     }
 
     @Override
     public void awaitAndTerminate() {
+        /*
+         * try { lock.lock(); while (messageCount > 0) {
+         * hasFinishCondition.await(); } } catch (InterruptedException e) {
+         * logger.error("Await terminate exception ", e); } finally {
+         * lock.unlock(); }
+         */
         try {
-            lock.lock();
-            while (messageCount > 0) {
-                hasFinishCondition.await();
-            }
+            Thread.sleep(15000);
         }
         catch (InterruptedException e) {
-            logger.error("Await terminate exception ", e);
-        }
-        finally {
-            lock.unlock();
+            // TODO Auto-generated catch block
+            e.printStackTrace();
         }
     }
 
     private Actor receiveMessage() throws InterruptedException {
         Actor actor = null;
         while (null == actor) {
-            try {
-                lock.lock();
-                if (messageCount <= 0) {
-                    hasMessageCondition.await();
-                }
-                actor = messageList.getAndRemoveMessageWithActor(actorManager);
-                if (null != actor) {
-                    return actor;
-                }
-                else {
-                    hasActiveActorCondition.await();
-                }
-            }
-            catch (Exception e) {
-                logger.error("Receive message exception ", e);
-            }
-            finally {
-                lock.unlock();
+            acquiredMessageListLock();
+            actor = messageList.getAndRemoveMessageWithActor(actorManager);
+            messageListAtomic.compareAndSet(1, 0);
+            if (null != actor) {
+                return actor;
             }
         }
         return actor;
     }
 
-    private void notifyActorReturn() {
-        try {
-            lock.lock();
-            hasActiveActorCondition.signal();
-        }
-        finally {
-            lock.unlock();
+    private void acquiredMessageListLock() {
+        while (messageListAtomic.get() > 0 || !messageListAtomic.compareAndSet(0, 1)) {
+
         }
     }
 
